@@ -1,0 +1,14 @@
+
+services:
+- type: cron
+  name: trading-bot-daily
+  schedule: "30 3 * * 1-5"   # 09:00 IST Mon-Fri
+  env: python
+  plan: starter
+  buildCommand: pip install -r requirements.txt
+  startCommand: python bot/main.py
+  envVars:
+  - key: TELEGRAM_TOKEN
+    sync: false
+  - key: TELEGRAM_CHAT_ID
+    sync: false
