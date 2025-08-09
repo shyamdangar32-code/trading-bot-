@@ -47,17 +47,32 @@ jobs:
             except Exception as e:
               print("Telegram error:", e)
 
-          # ---- data
-          df = yf.download("^NSEI", period="6mo", interval="1d",
-                           auto_adjust=True, progress=False)
-          if df is None or df.empty:
-            print("❌ No data from Yahoo.")
-            send("❌ No data from Yahoo for ^NSEI.")
-            raise SystemExit(0)
+          # --- data
+try:
+    df = yf.download("^NSEI", period="6mo", interval="1d", auto_adjust=True, progress=False)
+except Exception as e:
+    send(f"❌ Yahoo download error: {e}")
+    raise SystemExit(0)
 
-          df = df.rename_axis("Date").reset_index()
-          df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
-          df = df.dropna(subset=["Close"]).reset_index(drop=True)
+# empty DataFrame?
+if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+    send("❌ No data from Yahoo for ^NSEI.")
+    raise SystemExit(0)
+
+# ensure we have a 1D Close column
+if "Close" not in df.columns:
+    # Sometimes yfinance returns Adj Close or a MultiIndex
+    if "Adj Close" in df.columns:
+        df = df.rename(columns={"Adj Close": "Close"})
+    elif isinstance(df.columns, pd.MultiIndex) and "Adj Close" in df.columns.get_level_values(0):
+        df = df["Adj Close"].to_frame(name="Close")
+    else:
+        send("❌ Missing Close column in Yahoo data.")
+        raise SystemExit(0)
+
+df = df.rename_axis("Date").reset_index()
+df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
+df = df.dropna(subset=["Close"]).reset_index(drop=True)
 
           # ---- indicators
           df["EMA20"] = df["Close"].ewm(span=20, adjust=False).mean()
