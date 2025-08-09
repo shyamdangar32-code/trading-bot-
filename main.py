@@ -41,7 +41,7 @@ def run_once():
     try:
         df = fetch("^NSEI", "6mo", "1d")
         out = analyze(df)
-        text = f"📈 NIFTY summary {out['date']}
+        text = f"📈 NIFTY summary {out['date']}"
 Close: {out['close']:.2f}
 RSI(14): {out['rsi']:.1f}
 Signal: {out['signal']}"
