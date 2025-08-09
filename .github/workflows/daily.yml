@@ -1,5 +1,4 @@
 name: Daily NIFTY Signals
-
 on:
   schedule:
     # Every 30 min, Mon–Fri, 08:30–15:30 IST (UTC 03:00–10:59)
