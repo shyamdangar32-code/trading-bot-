@@ -1,11 +1,10 @@
 name: Daily NIFTY Signals
 
 on:
-  # Run manually from the Actions tab
-  workflow_dispatch:
-  # (Optional) uncomment to auto-run during market hours (Mon–Fri)
   # schedule:
-  #   - cron: "*/30 3-10 * * 1-5"   # every 30 min, 08:30–15:30 IST (UTC 03:00–10:59)
+  #   # Every 30 min, Mon–Fri, 08:30–15:30 IST (UTC 03:00–10:59)
+  #   - cron: "*/30 3-10 * * 1-5"
+  workflow_dispatch:
 
 jobs:
   run:
@@ -31,15 +30,12 @@ jobs:
           import os, requests, pandas as pd, numpy as np, yfinance as yf
           from ta.momentum import RSIIndicator
 
-          BOT  = os.getenv("TELEGRAM_BOT_TOKEN", "")
+          BOT = os.getenv("TELEGRAM_BOT_TOKEN", "")
           CHAT = os.getenv("TELEGRAM_CHAT_ID", "")
 
           def send(msg: str):
-            # Log to console
-            print("\n--- Telegram message ---\n" + msg + "\n------------------------\n")
-            # Try Telegram if creds exist
             if not BOT or not CHAT:
-              print("⚠️  No Telegram creds; skipping send.")
+              print("No Telegram creds; skipping send.")
               return
             try:
               r = requests.post(
@@ -47,73 +43,59 @@ jobs:
                 json={"chat_id": CHAT, "text": msg},
                 timeout=20,
               )
-              print("Telegram status:", r.status_code, r.text[:200])
+              print("Telegram status:", r.status_code)
             except Exception as e:
               print("Telegram error:", e)
 
-          # ---------- 1) Data (robust) ----------
-          df = yf.download("^NSEI", period="6mo", interval="1d", auto_adjust=False, progress=False)
-
-          if df is None or len(df) == 0:
-            send("❌ No data from Yahoo for ^NSEI.")
+          # ---------- 1) Data ----------
+          df = yf.download("^NSEI", period="6mo", interval="1d", auto_adjust=True, progress=False)
+          if df is None or df.empty:
+            print("No data from Yahoo for ^NSEI.")
             raise SystemExit(0)
 
-          # Normalize column names and locate a close-like column
-          df.columns = [str(c).strip().replace(" ", "").title()]  # "Adj Close" -> "Adjclose"
-          close_col = None
-          for cand in ["Close", "Adjclose", "AdjClose"]:
-            if cand in df.columns:
-              close_col = cand
-              break
-
-          if close_col is None:
-            send(f"❌ Can't find a close column. Columns: {list(df.columns)}")
-            raise SystemExit(0)
-
-          df = df.rename_axis("Date").reset_index()
-          df["Close"] = pd.to_numeric(df[close_col], errors="coerce")
+          # make a tidy frame with Date/Close
+          df = df.copy().rename_axis("Date").reset_index()
+          # ensure numeric Close and drop bad rows
+          df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
           df = df.dropna(subset=["Close"]).reset_index(drop=True)
-
-          if df.empty:
-            send("❌ Dataframe empty after cleaning.")
-            raise SystemExit(0)
 
           # ---------- 2) Indicators ----------
           df["EMA20"] = df["Close"].ewm(span=20, adjust=False).mean()
-          df["RSI"]   = RSIIndicator(close=df["Close"], window=14).rsi()
+          df["RSI"] = RSIIndicator(close=df["Close"], window=14).rsi()
 
           # ---------- 3) Signals ----------
-          # BUY  when 30 <= RSI <= 50 AND close crosses above EMA20
-          # SELL when RSI > 70           AND close crosses below EMA20
           df["Signal"] = None
           for i in range(1, len(df)):
             rsi = df.at[i, "RSI"]
-            c, p  = df.at[i, "Close"], df.at[i-1, "Close"]
-            e, ep = df.at[i, "EMA20"], df.at[i-1, "EMA20"]
-            if pd.notna(rsi) and pd.notna(c) and pd.notna(p) and pd.notna(e) and pd.notna(ep):
-              crossed_up   = (p < ep) and (c > e)
-              crossed_down = (p > ep) and (c < e)
+            curr_close = df.at[i, "Close"]
+            prev_close = df.at[i-1, "Close"]
+            curr_ema = df.at[i, "EMA20"]
+            prev_ema = df.at[i-1, "EMA20"]
+
+            if pd.notna(rsi) and pd.notna(curr_close) and pd.notna(prev_close) and pd.notna(curr_ema) and pd.notna(prev_ema):
+              crossed_up   = (prev_close < prev_ema) and (curr_close > curr_ema)
+              crossed_down = (prev_close > prev_ema) and (curr_close < curr_ema)
+
               if 30 <= rsi <= 50 and crossed_up:
                 df.at[i, "Signal"] = "BUY"
               elif rsi > 70 and crossed_down:
                 df.at[i, "Signal"] = "SELL"
 
-          s = df.dropna(subset=["Signal"]).copy()
-
-          # ---------- 4) Notify ----------
+          s = df.dropna(subset=["Signal"])
           if s.empty:
-            send("📝 No new NIFTY signal this run.")
-            print("No signal.")
+            msg = "No new NIFTY signal today."
+            print(msg)
+            send(msg)
             raise SystemExit(0)
 
           last = s.iloc[-1]
           msg = (
-            f"📈 NIFTY Signal: {last['Signal']}\n"
+            f"NIFTY Signal: {last['Signal']}\n"
             f"Date: {pd.to_datetime(last['Date']).date()}\n"
             f"Close: {last['Close']:.2f}\n"
             f"EMA20: {last['EMA20']:.2f}\n"
             f"RSI: {last['RSI']:.2f}"
           )
+          print(msg)
           send(msg)
-          print("✅ Done.")
           PY
