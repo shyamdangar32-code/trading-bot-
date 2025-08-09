@@ -1,9 +1,10 @@
 name: Daily NIFTY Signals
+
 on:
-  schedule:
-    # Every 30 min, Mon–Fri, 08:30–15:30 IST (UTC 03:00–10:59)
-    - cron: "*/30 3-10 * * 1-5"
   workflow_dispatch:
+  # schedule:
+  #   # every 30 min, Mon–Fri, 08:30–15:30 IST (UTC 03:00–10:59)
+  #   - cron: "*/30 3-10 * * 1-5"
 
 jobs:
   run:
@@ -23,7 +24,7 @@ jobs:
       - name: Run bot
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python - <<'PY'
           import os, requests, pandas as pd, numpy as np, yfinance as yf
@@ -32,46 +33,42 @@ jobs:
           BOT  = os.getenv("TELEGRAM_BOT_TOKEN", "")
           CHAT = os.getenv("TELEGRAM_CHAT_ID", "")
 
-          def send(m: str):
-            if not BOT or not CHAT:
-              print("⚠️ No Telegram creds; skipping send.")
-              return
-            try:
-              r = requests.post(
-                f"https://api.telegram.org/bot{BOT}/sendMessage",
-                json={"chat_id": CHAT, "text": m},
-                timeout=20
-              )
-              print("Telegram status:", r.status_code)
-            except Exception as e:
-              print("Telegram error:", e)
+          def send(msg: str):
+              if not BOT or not CHAT:
+                  print("⚠️ No Telegram creds; skipping send.")
+                  return
+              try:
+                  r = requests.post(
+                      f"https://api.telegram.org/bot{BOT}/sendMessage",
+                      json={"chat_id": CHAT, "text": msg},
+                      timeout=20,
+                  )
+                  print("Telegram status:", r.status_code, r.text[:200])
+              except Exception as e:
+                  print("Telegram error:", e)
 
-          # --- data
-try:
-    df = yf.download("^NSEI", period="6mo", interval="1d", auto_adjust=True, progress=False)
-except Exception as e:
-    send(f"❌ Yahoo download error: {e}")
-    raise SystemExit(0)
+          # ---- data
+          df = yf.download("^NSEI", period="6mo", interval="1d",
+                           auto_adjust=True, progress=False)
+          if df is None or len(df) == 0:
+              msg = "❌ No data from Yahoo for ^NSEI."
+              print(msg); send(msg)
+              raise SystemExit(0)
 
-# empty DataFrame?
-if df is None or not isinstance(df, pd.DataFrame) or df.empty:
-    send("❌ No data from Yahoo for ^NSEI.")
-    raise SystemExit(0)
+          # normalize into a DataFrame with Date column
+          if not isinstance(df, pd.DataFrame):
+              df = pd.DataFrame(df)
+          df = df.copy()
+          df = df.rename_axis("Date").reset_index()
 
-# ensure we have a 1D Close column
-if "Close" not in df.columns:
-    # Sometimes yfinance returns Adj Close or a MultiIndex
-    if "Adj Close" in df.columns:
-        df = df.rename(columns={"Adj Close": "Close"})
-    elif isinstance(df.columns, pd.MultiIndex) and "Adj Close" in df.columns.get_level_values(0):
-        df = df["Adj Close"].to_frame(name="Close")
-    else:
-        send("❌ Missing Close column in Yahoo data.")
-        raise SystemExit(0)
-
-df = df.rename_axis("Date").reset_index()
-df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
-df = df.dropna(subset=["Close"]).reset_index(drop=True)
+          # make a 1-D Close series robustly (avoids TypeError)
+          if "Close" not in df.columns:
+              msg = "❌ 'Close' column missing."
+              print(msg); send(msg)
+              raise SystemExit(1)
+          close = pd.Series(np.asarray(df["Close"]).ravel())
+          df["Close"] = pd.to_numeric(close, errors="coerce")
+          df = df.dropna(subset=["Close"]).reset_index(drop=True)
 
           # ---- indicators
           df["EMA20"] = df["Close"].ewm(span=20, adjust=False).mean()
@@ -80,32 +77,29 @@ df = df.dropna(subset=["Close"]).reset_index(drop=True)
           # ---- signals
           df["Signal"] = None
           for i in range(1, len(df)):
-            rsi = df.at[i, "RSI"]
-            c, p  = df.at[i, "Close"],  df.at[i-1, "Close"]
-            e, ep = df.at[i, "EMA20"], df.at[i-1, "EMA20"]
-            if pd.notna(rsi) and pd.notna(c) and pd.notna(p) and pd.notna(e) and pd.notna(ep):
-              crossed_up   = (p < ep) and (c > e)
-              crossed_down = (p > ep) and (c < e)
-              if 30 <= rsi <= 50 and crossed_up:
-                df.at[i, "Signal"] = "BUY"
-              elif rsi > 70 and crossed_down:
-                df.at[i, "Signal"] = "SELL"
+              rsi = df.at[i, "RSI"]
+              c, p = df.at[i, "Close"],  df.at[i-1, "Close"]
+              e, ep= df.at[i, "EMA20"], df.at[i-1, "EMA20"]
+              if pd.notna(rsi) and pd.notna(c) and pd.notna(p) and pd.notna(e) and pd.notna(ep):
+                  crossed_up   = (p < ep) and (c > e)
+                  crossed_down = (p > ep) and (c < e)
+                  if 30 <= rsi <= 50 and crossed_up:
+                      df.at[i, "Signal"] = "BUY"
+                  elif rsi > 70 and crossed_down:
+                      df.at[i, "Signal"] = "SELL"
 
           s = df.dropna(subset=["Signal"])
           if s.empty:
-            msg = "🧭 No new NIFTY signal this run."
-            print(msg)
-            send(msg)
-            raise SystemExit(0)
+              msg = "✅ Run complete. No new NIFTY signal today."
+              print(msg); send(msg); raise SystemExit(0)
 
           last = s.iloc[-1]
           msg = (
-            f"🚨 NIFTY Signal: {last['Signal']}\n"
-            f"Date: {pd.to_datetime(last['Date']).date()}\n"
-            f"Close: {last['Close']:.2f}\n"
-            f"EMA20: {last['EMA20']:.2f}\n"
-            f"RSI: {last['RSI']:.2f}"
+              f"🚨 NIFTY Signal: {last['Signal']}\n"
+              f"Date: {pd.to_datetime(last['Date']).date()}\n"
+              f"Close: {last['Close']:.2f}\n"
+              f"EMA20: {last['EMA20']:.2f}\n"
+              f"RSI: {last['RSI']:.2f}"
           )
-          print(msg)
-          send(msg)
+          print(msg); send(msg)
           PY
