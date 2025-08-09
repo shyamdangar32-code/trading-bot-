@@ -1,10 +1,11 @@
 name: Daily NIFTY Signals
 
 on:
+  # Run manually from the Actions tab
   workflow_dispatch:
+  # (Optional) uncomment to auto-run during market hours (Mon–Fri)
   # schedule:
-  #   # every 30 min, Mon–Fri, 08:30–15:30 IST (UTC 03:00–10:59)
-  #   - cron: "*/30 3-10 * * 1-5"
+  #   - cron: "*/30 3-10 * * 1-5"   # every 30 min, 08:30–15:30 IST (UTC 03:00–10:59)
 
 jobs:
   run:
@@ -24,7 +25,7 @@ jobs:
       - name: Run bot
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python - <<'PY'
           import os, requests, pandas as pd, numpy as np, yfinance as yf
@@ -34,72 +35,85 @@ jobs:
           CHAT = os.getenv("TELEGRAM_CHAT_ID", "")
 
           def send(msg: str):
-              if not BOT or not CHAT:
-                  print("⚠️ No Telegram creds; skipping send.")
-                  return
-              try:
-                  r = requests.post(
-                      f"https://api.telegram.org/bot{BOT}/sendMessage",
-                      json={"chat_id": CHAT, "text": msg},
-                      timeout=20,
-                  )
-                  print("Telegram status:", r.status_code, r.text[:200])
-              except Exception as e:
-                  print("Telegram error:", e)
+            # Log to console
+            print("\n--- Telegram message ---\n" + msg + "\n------------------------\n")
+            # Try Telegram if creds exist
+            if not BOT or not CHAT:
+              print("⚠️  No Telegram creds; skipping send.")
+              return
+            try:
+              r = requests.post(
+                f"https://api.telegram.org/bot{BOT}/sendMessage",
+                json={"chat_id": CHAT, "text": msg},
+                timeout=20,
+              )
+              print("Telegram status:", r.status_code, r.text[:200])
+            except Exception as e:
+              print("Telegram error:", e)
 
-          # ---- data
-          df = yf.download("^NSEI", period="6mo", interval="1d",
-                           auto_adjust=True, progress=False)
+          # ---------- 1) Data (robust) ----------
+          df = yf.download("^NSEI", period="6mo", interval="1d", auto_adjust=False, progress=False)
+
           if df is None or len(df) == 0:
-              msg = "❌ No data from Yahoo for ^NSEI."
-              print(msg); send(msg)
-              raise SystemExit(0)
+            send("❌ No data from Yahoo for ^NSEI.")
+            raise SystemExit(0)
 
-          # normalize into a DataFrame with Date column
-          if not isinstance(df, pd.DataFrame):
-              df = pd.DataFrame(df)
-          df = df.copy()
+          # Normalize column names and locate a close-like column
+          df.columns = [str(c).strip().replace(" ", "").title()]  # "Adj Close" -> "Adjclose"
+          close_col = None
+          for cand in ["Close", "Adjclose", "AdjClose"]:
+            if cand in df.columns:
+              close_col = cand
+              break
+
+          if close_col is None:
+            send(f"❌ Can't find a close column. Columns: {list(df.columns)}")
+            raise SystemExit(0)
+
           df = df.rename_axis("Date").reset_index()
-
-          # make a 1-D Close series robustly (avoids TypeError)
-          if "Close" not in df.columns:
-              msg = "❌ 'Close' column missing."
-              print(msg); send(msg)
-              raise SystemExit(1)
-          close = pd.Series(np.asarray(df["Close"]).ravel())
-          df["Close"] = pd.to_numeric(close, errors="coerce")
+          df["Close"] = pd.to_numeric(df[close_col], errors="coerce")
           df = df.dropna(subset=["Close"]).reset_index(drop=True)
 
-          # ---- indicators
+          if df.empty:
+            send("❌ Dataframe empty after cleaning.")
+            raise SystemExit(0)
+
+          # ---------- 2) Indicators ----------
           df["EMA20"] = df["Close"].ewm(span=20, adjust=False).mean()
           df["RSI"]   = RSIIndicator(close=df["Close"], window=14).rsi()
 
-          # ---- signals
+          # ---------- 3) Signals ----------
+          # BUY  when 30 <= RSI <= 50 AND close crosses above EMA20
+          # SELL when RSI > 70           AND close crosses below EMA20
           df["Signal"] = None
           for i in range(1, len(df)):
-              rsi = df.at[i, "RSI"]
-              c, p = df.at[i, "Close"],  df.at[i-1, "Close"]
-              e, ep= df.at[i, "EMA20"], df.at[i-1, "EMA20"]
-              if pd.notna(rsi) and pd.notna(c) and pd.notna(p) and pd.notna(e) and pd.notna(ep):
-                  crossed_up   = (p < ep) and (c > e)
-                  crossed_down = (p > ep) and (c < e)
-                  if 30 <= rsi <= 50 and crossed_up:
-                      df.at[i, "Signal"] = "BUY"
-                  elif rsi > 70 and crossed_down:
-                      df.at[i, "Signal"] = "SELL"
+            rsi = df.at[i, "RSI"]
+            c, p  = df.at[i, "Close"], df.at[i-1, "Close"]
+            e, ep = df.at[i, "EMA20"], df.at[i-1, "EMA20"]
+            if pd.notna(rsi) and pd.notna(c) and pd.notna(p) and pd.notna(e) and pd.notna(ep):
+              crossed_up   = (p < ep) and (c > e)
+              crossed_down = (p > ep) and (c < e)
+              if 30 <= rsi <= 50 and crossed_up:
+                df.at[i, "Signal"] = "BUY"
+              elif rsi > 70 and crossed_down:
+                df.at[i, "Signal"] = "SELL"
 
-          s = df.dropna(subset=["Signal"])
+          s = df.dropna(subset=["Signal"]).copy()
+
+          # ---------- 4) Notify ----------
           if s.empty:
-              msg = "✅ Run complete. No new NIFTY signal today."
-              print(msg); send(msg); raise SystemExit(0)
+            send("📝 No new NIFTY signal this run.")
+            print("No signal.")
+            raise SystemExit(0)
 
           last = s.iloc[-1]
           msg = (
-              f"🚨 NIFTY Signal: {last['Signal']}\n"
-              f"Date: {pd.to_datetime(last['Date']).date()}\n"
-              f"Close: {last['Close']:.2f}\n"
-              f"EMA20: {last['EMA20']:.2f}\n"
-              f"RSI: {last['RSI']:.2f}"
+            f"📈 NIFTY Signal: {last['Signal']}\n"
+            f"Date: {pd.to_datetime(last['Date']).date()}\n"
+            f"Close: {last['Close']:.2f}\n"
+            f"EMA20: {last['EMA20']:.2f}\n"
+            f"RSI: {last['RSI']:.2f}"
           )
-          print(msg); send(msg)
+          send(msg)
+          print("✅ Done.")
           PY
