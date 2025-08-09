@@ -1,10 +1,10 @@
 name: Daily NIFTY Signals
 
 on:
-  workflow_dispatch: {}
-  # Uncomment after testing if you want auto schedule (IST ~09:15–15:30 every 30min)
-  # schedule:
-  #   - cron: "*/30 3-10 * * 1-5"
+  schedule:
+    # Every 30 min, Mon–Fri, 08:30–15:30 IST  (UTC 03:00–10:59)
+    - cron: "*/30 3-10 * * 1-5"
+  workflow_dispatch:
 
 jobs:
   run:
@@ -24,81 +24,86 @@ jobs:
       - name: Run bot
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python - <<'PY'
-          import os, requests, pandas as pd, numpy as np, yfinance as yf
+          import os, sys, pandas as pd, numpy as np, requests, yfinance as yf
           from ta.momentum import RSIIndicator
 
-          BOT = os.getenv("TELEGRAM_BOT_TOKEN", "")
+          BOT  = os.getenv("TELEGRAM_BOT_TOKEN", "")
           CHAT = os.getenv("TELEGRAM_CHAT_ID", "")
 
           def send(msg: str):
-              if not BOT or not CHAT:
-                  print("⚠️ No Telegram creds; skipping send.")
-                  return
-              try:
-                  r = requests.post(
-                      f"https://api.telegram.org/bot{BOT}/sendMessage",
-                      json={"chat_id": CHAT, "text": msg},
-                      timeout=20,
-                  )
-                  print("Telegram status:", r.status_code, r.text[:200])
-              except Exception as e:
-                  print("Telegram error:", e)
+            print(msg)
+            if not BOT or not CHAT:
+              print("⚠️ No Telegram creds; skipping send.")
+              return
+            try:
+              r = requests.post(
+                f"https://api.telegram.org/bot{BOT}/sendMessage",
+                json={"chat_id": CHAT, "text": msg},
+                timeout=20,
+              )
+              print("Telegram status:", r.status_code, r.text[:200])
+            except Exception as e:
+              print("Telegram error:", e)
 
-          # --- data
-          df = yf.download("^NSEI", period="6mo", interval="1d", auto_adjust=True, progress=False)
+          # --- download last 6 months daily
+          df = yf.download("^NSEI", period="6mo", interval="1d",
+                           auto_adjust=True, progress=False)
 
           if df is None or len(df) == 0:
-              msg = "❌ No data from Yahoo for ^NSEI."
-              print(msg); send(msg); raise SystemExit(1)
+            send("❌ No data from Yahoo for ^NSEI.")
+            sys.exit(0)
 
-          # Make sure it's a normal dataframe (not MultiIndex columns)
+          # Normalize columns
           if isinstance(df.columns, pd.MultiIndex):
-              df.columns = [c[-1] for c in df.columns]
+            # Prefer the OHLC level if present
+            try:
+              df.columns = [lvl[1] if lvl[1] else lvl[0] for lvl in df.columns]
+            except Exception:
+              df.columns = [str(c[-1] if isinstance(c, tuple) else c) for c in df.columns]
+
+          # Ensure we have Close
+          if "Close" not in df.columns:
+            send(f"❌ 'Close' column missing. Columns: {list(df.columns)}")
+            sys.exit(0)
 
           df = df.rename_axis("Date").reset_index()
-
-          # --- CRITICAL FIX: ensure Close is a proper Series before to_numeric
-          if "Close" not in df.columns:
-              msg = f"❌ 'Close' column missing. Columns: {df.columns.tolist()}"
-              print(msg); send(msg); raise SystemExit(1)
-
-          close_series = pd.Series(df["Close"]).copy()
-          df["Close"] = pd.to_numeric(close_series, errors="coerce")
+          # make numeric & drop NA
+          df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
           df = df.dropna(subset=["Close"]).reset_index(drop=True)
 
-          # --- indicators
+          # Indicators
           df["EMA20"] = df["Close"].ewm(span=20, adjust=False).mean()
           df["RSI"]   = RSIIndicator(close=df["Close"], window=14).rsi()
 
-          # --- signals
+          # Signals
           df["Signal"] = None
           for i in range(1, len(df)):
-              rsi = df.at[i, "RSI"]
-              c, p = df.at[i, "Close"], df.at[i-1, "Close"]
-              e, ep = df.at[i, "EMA20"], df.at[i-1, "EMA20"]
-              if pd.notna(rsi) and pd.notna(c) and pd.notna(p) and pd.notna(e) and pd.notna(ep):
-                  crossed_up   = (p < ep) and (c > e)
-                  crossed_down = (p > ep) and (c < e)
-                  if 30 <= rsi <= 50 and crossed_up:
-                      df.at[i, "Signal"] = "BUY"
-                  elif rsi > 70 and crossed_down:
-                      df.at[i, "Signal"] = "SELL"
+            rsi = df.at[i, "RSI"]
+            c, p  = df.at[i, "Close"], df.at[i-1, "Close"]
+            e, ep = df.at[i, "EMA20"], df.at[i-1, "EMA20"]
+            if pd.notna(rsi) and pd.notna(c) and pd.notna(p) and pd.notna(e) and pd.notna(ep):
+              crossed_up   = (p < ep) and (c > e)
+              crossed_down = (p > ep) and (c < e)
+              if 30 <= rsi <= 50 and crossed_up:
+                df.at[i, "Signal"] = "BUY"
+              elif rsi > 70 and crossed_down:
+                df.at[i, "Signal"] = "SELL"
 
           s = df.dropna(subset=["Signal"])
           if s.empty:
-              msg = "✅ Run complete. No new NIFTY signal this run."
-              print(msg); send(msg); raise SystemExit(0)
+            send("📝 No new NIFTY signal this run.")
+            sys.exit(0)
 
           last = s.iloc[-1]
           msg = (
-              f"📈 NIFTY Signal: {last['Signal']}\n"
-              f"Date: {pd.to_datetime(last['Date']).date()}\n"
-              f"Close: {last['Close']:.2f}\n"
-              f"EMA20: {last['EMA20']:.2f}\n"
-              f"RSI: {last['RSI']:.2f}"
+            f"🚨 NIFTY Signal: {last['Signal']}\n"
+            f"Date: {pd.to_datetime(last['Date']).date()}\n"
+            f"Close: {last['Close']:.2f}\n"
+            f"EMA20: {last['EMA20']:.2f}\n"
+            f"RSI: {last['RSI']:.2f}"
           )
-          print(msg); send(msg)
+          send(msg)
           PY
