@@ -1,0 +1,51 @@
+name: Daily NIFTY Signals
+on:
+  schedule:
+    - cron: "*/30 3-10 * * 1-5"   # every 30min, Mon–Fri, 09:15–15:30 IST
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: |
+          pip install --upgrade pip
+          pip install yfinance ta requests pandas numpy
+      - name: Run bot
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python - << 'PY'
+import os, requests, pandas as pd, numpy as np, yfinance as yf
+from ta.momentum import RSIIndicator
+BOT=os.getenv("TELEGRAM_BOT_TOKEN",""); CHAT=os.getenv("TELEGRAM_CHAT_ID","")
+def send(m):
+    if not BOT or not CHAT: return
+    requests.post(f"https://api.telegram.org/bot{BOT}/sendMessage",
+                  json={"chat_id": CHAT, "text": m}, timeout=20)
+df=yf.download("^NSEI", period="6mo", interval="1d", auto_adjust=True, progress=False)
+if df.empty: send("❌ No data from Yahoo."); raise SystemExit()
+df=df.rename_axis("Date").reset_index()
+df["Close"]=pd.to_numeric(df["Close"], errors="coerce"); df=df.dropna(subset=["Close"]).reset_index(drop=True)
+df["EMA20"]=df["Close"].ewm(span=20, adjust=False).mean()
+df["RSI"]=RSIIndicator(close=df["Close"], window=14).rsi()
+df["Signal"]=None
+for i in range(1,len(df)):
+    rsi=df.at[i,"RSI"]; c,p=df.at[i,"Close"],df.at[i-1,"Close"]; e,ep=df.at[i,"EMA20"],df.at[i-1,"EMA20"]
+    if pd.notna(rsi) and pd.notna(c) and pd.notna(p) and pd.notna(e) and pd.notna(ep):
+        up=(p<ep and c>e); down=(p>ep and c<e)
+        if 30<=rsi<=50 and up: df.at[i,"Signal"]="BUY"
+        elif rsi>70 and down:  df.at[i,"Signal"]="SELL"
+s=df.dropna(subset=["Signal"])
+if s.empty: send("📉 No new NIFTY signal this run.")
+else:
+    last=s.iloc[-1]
+    send(f"🚨 NIFTY Signal: {last['Signal']}\nDate: {pd.to_datetime(last['Date']).date()}\nClose: {last['Close']:.2f}\nEMA20: {last['EMA20']:.2f}\nRSI: {last['RSI']:.2f}")
+print("✅ Run complete.")
+PY
