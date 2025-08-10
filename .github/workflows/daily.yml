@@ -23,32 +23,40 @@ jobs:
 
       - name: Run bot
         env:
+          # Support either secret naming scheme
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          TG_BOT_TOKEN:       ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID:         ${{ secrets.TG_CHAT_ID }}
         run: |
           python - <<'PY'
           import os, sys, pandas as pd, numpy as np, requests, yfinance as yf
           from ta.momentum import RSIIndicator
 
-          BOT  = os.getenv("TELEGRAM_BOT_TOKEN", "")
-          CHAT = os.getenv("TELEGRAM_CHAT_ID", "")
+          # Use whichever secret names are present
+          BOT  = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TG_BOT_TOKEN") or ""
+          CHAT = os.getenv("TELEGRAM_CHAT_ID")   or os.getenv("TG_CHAT_ID")   or ""
+
+          # --- DEBUG: show whether creds are present (but not the values)
+          print("DEBUG | BOT token present? ", bool(BOT))
+          print("DEBUG | CHAT ID present?   ", bool(CHAT))
 
           def send(msg: str):
-            print(msg)
-            if not BOT or not CHAT:
-              print("⚠️ No Telegram creds; skipping send.")
-              return
-            try:
-              r = requests.post(
-                f"https://api.telegram.org/bot{BOT}/sendMessage",
-                json={"chat_id": CHAT, "text": msg},
-                timeout=20,
-              )
-              print("Telegram status:", r.status_code, r.text[:200])
-            except Exception as e:
-              print("Telegram error:", e)
+              print("SEND ->", msg.replace("\n", " | "))
+              if not BOT or not CHAT:
+                  print("⚠️ No Telegram creds; skipping send.")
+                  return
+              try:
+                  r = requests.post(
+                      f"https://api.telegram.org/bot{BOT}/sendMessage",
+                      json={"chat_id": CHAT, "text": msg},
+                      timeout=20,
+                  )
+                  print("Telegram status:", r.status_code, r.text[:200])
+              except Exception as e:
+                  print("Telegram error:", e)
 
-          # --- download last 6 months daily
+          # --- download last 6 months daily data
           df = yf.download("^NSEI", period="6mo", interval="1d",
                            auto_adjust=True, progress=False)
 
@@ -58,15 +66,14 @@ jobs:
 
           # Normalize columns
           if isinstance(df.columns, pd.MultiIndex):
-            try:
-              df.columns = [lvl[1] if lvl[1] else lvl[0] for lvl in df.columns]
-            except Exception:
-              df.columns = [str(c[-1] if isinstance(c, tuple) else c) for c in df.columns]
+              try:
+                  df.columns = [lvl[1] if lvl[1] else lvl[0] for lvl in df.columns]
+              except Exception:
+                  df.columns = [str(c[-1] if isinstance(c, tuple) else c) for c in df.columns]
 
-          # Ensure we have Close
           if "Close" not in df.columns:
-            send(f"❌ 'Close' column missing. Columns: {list(df.columns)}")
-            sys.exit(0)
+              send(f"❌ 'Close' column missing. Columns: {list(df.columns)}")
+              sys.exit(0)
 
           df = df.rename_axis("Date").reset_index()
           df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
@@ -79,29 +86,29 @@ jobs:
           # Signals
           df["Signal"] = None
           for i in range(1, len(df)):
-            rsi = df.at[i, "RSI"]
-            c, p  = df.at[i, "Close"], df.at[i-1, "Close"]
-            e, ep = df.at[i, "EMA20"], df.at[i-1, "EMA20"]
-            if pd.notna(rsi) and pd.notna(c) and pd.notna(p) and pd.notna(e) and pd.notna(ep):
-              crossed_up   = (p < ep) and (c > e)
-              crossed_down = (p > ep) and (c < e)
-              if 30 <= rsi <= 50 and crossed_up:
-                df.at[i, "Signal"] = "BUY"
-              elif rsi > 70 and crossed_down:
-                df.at[i, "Signal"] = "SELL"
+              rsi = df.at[i, "RSI"]
+              c, p  = df.at[i, "Close"], df.at[i-1, "Close"]
+              e, ep = df.at[i, "EMA20"], df.at[i-1, "EMA20"]
+              if pd.notna(rsi) and pd.notna(c) and pd.notna(p) and pd.notna(e) and pd.notna(ep):
+                  crossed_up   = (p < ep) and (c > e)
+                  crossed_down = (p > ep) and (c < e)
+                  if 30 <= rsi <= 50 and crossed_up:
+                      df.at[i, "Signal"] = "BUY"
+                  elif rsi > 70 and crossed_down:
+                      df.at[i, "Signal"] = "SELL"
 
           s = df.dropna(subset=["Signal"])
           if s.empty:
-            send("📝 No new NIFTY signal this run.")
-            sys.exit(0)
+              send("📝 No new NIFTY signal this run.")
+              sys.exit(0)
 
           last = s.iloc[-1]
           msg = (
-            f"🚨 NIFTY Signal: {last['Signal']}\n"
-            f"Date: {pd.to_datetime(last['Date']).date()}\n"
-            f"Close: {last['Close']:.2f}\n"
-            f"EMA20: {last['EMA20']:.2f}\n"
-            f"RSI: {last['RSI']:.2f}"
+              f"🚨 NIFTY Signal: {last['Signal']}\n"
+              f"Date: {pd.to_datetime(last['Date']).date()}\n"
+              f"Close: {last['Close']:.2f}\n"
+              f"EMA20: {last['EMA20']:.2f}\n"
+              f"RSI: {last['RSI']:.2f}"
           )
           send(msg)
           PY
@@ -110,11 +117,19 @@ jobs:
       - name: Telegram alert (workflow status)
         if: ${{ always() }}
         env:
-          BOT: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+          BOT1:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          BOT2:  ${{ secrets.TG_BOT_TOKEN }}
+          CHAT1: ${{ secrets.TELEGRAM_CHAT_ID }}
+          CHAT2: ${{ secrets.TG_CHAT_ID }}
           STATUS: ${{ job.status }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          BOT="${BOT1:-$BOT2}"
+          CHAT="${CHAT1:-$CHAT2}"
+          if [ -z "$BOT" ] || [ -z "$CHAT" ]; then
+            echo "No Telegram secrets set; skipping meta alert."
+            exit 0
+          fi
           MSG="Daily NIFTY Signals workflow: ${STATUS}%0A${RUN_URL}"
           curl -s "https://api.telegram.org/bot${BOT}/sendMessage" \
             -d "chat_id=${CHAT}" \
