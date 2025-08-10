@@ -106,7 +106,7 @@ jobs:
           send(msg)
           PY
 
-      # <-- NEW: this step always runs, even if anything above fails
+      # Always send a meta alert so you know if the workflow itself passed/failed
       - name: Telegram alert (workflow status)
         if: ${{ always() }}
         env:
