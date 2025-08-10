@@ -58,7 +58,6 @@ jobs:
 
           # Normalize columns
           if isinstance(df.columns, pd.MultiIndex):
-            # Prefer the OHLC level if present
             try:
               df.columns = [lvl[1] if lvl[1] else lvl[0] for lvl in df.columns]
             except Exception:
@@ -70,7 +69,6 @@ jobs:
             sys.exit(0)
 
           df = df.rename_axis("Date").reset_index()
-          # make numeric & drop NA
           df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
           df = df.dropna(subset=["Close"]).reset_index(drop=True)
 
@@ -107,3 +105,17 @@ jobs:
           )
           send(msg)
           PY
+
+      # <-- NEW: this step always runs, even if anything above fails
+      - name: Telegram alert (workflow status)
+        if: ${{ always() }}
+        env:
+          BOT: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+          STATUS: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          MSG="Daily NIFTY Signals workflow: ${STATUS}%0A${RUN_URL}"
+          curl -s "https://api.telegram.org/bot${BOT}/sendMessage" \
+            -d "chat_id=${CHAT}" \
+            -d "text=${MSG}"
