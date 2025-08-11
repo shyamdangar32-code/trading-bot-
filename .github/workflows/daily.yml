@@ -1,126 +1,157 @@
-import os, sys, time, json, requests
+import os
+import sys
+import json
+import time
+import traceback
+from typing import Optional
+
 import pandas as pd
 import numpy as np
+import requests
 import yfinance as yf
 from ta.momentum import RSIIndicator
 
-# ------------- Secrets (read from GitHub Actions or your .env) -------------
-TG_BOT = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TG_CHAT = os.getenv("TELEGRAM_CHAT_ID", "")
-Z_API_KEY = os.getenv("ZERODHA_API_KEY", "")
-Z_API_SECRET = os.getenv("ZERODHA_API_SECRET", "")
-# NOTE: Trading requires an ACCESS TOKEN you regenerate after login.
-Z_ACCESS_TOKEN = os.getenv("ZERODHA_ACCESS_TOKEN", "")  # optional
+# --- Env (all optional except Telegram if you want alerts)
+TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TG_CHAT  = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
-# ------------- Helpers ------------------------------------------------------
-def tgsend(text: str):
-    """Send a Telegram message (no-op if creds missing)."""
+Z_API_KEY    = os.getenv("ZERODHA_API_KEY", "").strip()
+Z_API_SECRET = os.getenv("ZERODHA_API_SECRET", "").strip()
+Z_ACCESS     = os.getenv("ZERODHA_ACCESS_TOKEN", "").strip()  # optional (daily session token)
+
+# --- Safe Telegram sender -----------------------------------------------------
+def tgsend(text: str) -> None:
+    """Send a Telegram message if creds exist; always log to console."""
     print(text)
-    if not TG_BOT or not TG_CHAT:
-        print("⚠️ Telegram creds not set; skipping send.")
+    if not TG_TOKEN or not TG_CHAT:
+        print("⚠️  No Telegram creds present; skipping Telegram send.")
         return
     try:
         r = requests.post(
-            f"https://api.telegram.org/bot{TG_BOT}/sendMessage",
+            f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
             json={"chat_id": TG_CHAT, "text": text},
             timeout=20,
         )
-        print("Telegram status:", r.status_code, r.text[:200])
+        print("Telegram response:", r.status_code, r.text[:300])
     except Exception as e:
         print("Telegram error:", e)
 
-def fetch_nifty(period="6mo", interval="1d") -> pd.DataFrame:
-    """Download NIFTY data from Yahoo."""
-    df = yf.download("^NSEI", period=period, interval=interval,
-                     auto_adjust=True, progress=False)
+# --- Zerodha (optional) -------------------------------------------------------
+def get_kite():
+    """
+    Return an authenticated KiteConnect client if api_key + access_token exist.
+    We do NOT place any orders here. This is only to verify connectivity or
+    fetch data once you’re ready. (Paper mode until you explicitly approve live.)
+    """
+    if not Z_API_KEY or not Z_ACCESS:
+        return None
+    try:
+        from kiteconnect import KiteConnect
+    except Exception:
+        print("ℹ️  kiteconnect not installed; skipping Zerodha step.")
+        return None
+    try:
+        kite = KiteConnect(api_key=Z_API_KEY)
+        kite.set_access_token(Z_ACCESS)
+        # quick harmless call — user profile
+        _ = kite.margins()  # proves token works without placing orders
+        print("✅ Zerodha: access token seems valid.")
+        return kite
+    except Exception as e:
+        print("⚠️  Zerodha init failed:", e)
+        return None
+
+# --- Data & Signals -----------------------------------------------------------
+def fetch_nifty_daily(period="6mo", interval="1d") -> pd.DataFrame:
+    df = yf.download("^NSEI", period=period, interval=interval, auto_adjust=True, progress=False)
     if df is None or len(df) == 0:
         raise RuntimeError("No data from Yahoo for ^NSEI.")
-    # If MultiIndex columns, flatten
+    # yfinance sometimes returns MultiIndex columns for adjusted data; normalize
     if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [c[-1] if isinstance(c, tuple) else str(c) for c in df.columns]
+        try:
+            df.columns = [lvl[1] if lvl[1] else lvl[0] for lvl in df.columns]
+        except Exception:
+            df.columns = [str(c[-1] if isinstance(c, tuple) else c) for c in df.columns]
     if "Close" not in df.columns:
-        raise RuntimeError(f"'Close' column missing. Columns: {list(df.columns)}")
-    df = df.rename_axis("Date").reset_index().copy()
+        raise RuntimeError(f"'Close' column missing. Columns found: {list(df.columns)}")
+    df = df.rename_axis("Date").reset_index()
     df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
     df = df.dropna(subset=["Close"]).reset_index(drop=True)
     return df
 
-def analyze(df: pd.DataFrame) -> dict:
-    """EMA20 + RSI(14) crossover rule → BUY/SELL/HOLD."""
+def compute_signal(df: pd.DataFrame) -> Optional[dict]:
+    """
+    Strategy: EMA20 crossover filtered by RSI(14).
+    BUY  when price crosses above EMA20 and RSI in 30–50.
+    SELL when price crosses below EMA20 and RSI > 70.
+    Returns last signal dict or None.
+    """
     df["EMA20"] = df["Close"].ewm(span=20, adjust=False).mean()
     df["RSI"]   = RSIIndicator(close=df["Close"], window=14).rsi()
 
-    sig = "HOLD"
-    if len(df) >= 2:
-        c, p  = df.iloc[-1]["Close"], df.iloc[-2]["Close"]
-        e, ep = df.iloc[-1]["EMA20"], df.iloc[-2]["EMA20"]
-        rsi   = float(df.iloc[-1]["RSI"])
-        crossed_up   = (p < ep) and (c > e)
-        crossed_down = (p > ep) and (c < e)
-        if 30 <= rsi <= 50 and crossed_up:
-            sig = "BUY"
-        elif rsi > 70 and crossed_down:
-            sig = "SELL"
+    sig_idx = None
+    for i in range(1, len(df)):
+        rsi = df.at[i, "RSI"]
+        c, p  = df.at[i, "Close"], df.at[i-1, "Close"]
+        e, ep = df.at[i, "EMA20"], df.at[i-1, "EMA20"]
+        if pd.notna(rsi) and pd.notna(c) and pd.notna(p) and pd.notna(e) and pd.notna(ep):
+            up   = (p < ep) and (c > e)
+            down = (p > ep) and (c < e)
+            if 30 <= rsi <= 50 and up:
+                df.at[i, "Signal"] = "BUY"
+                sig_idx = i
+            elif rsi > 70 and down:
+                df.at[i, "Signal"] = "SELL"
+                sig_idx = i
 
-    out = {
-        "date": str(df.iloc[-1]["Date"])[:10],
-        "close": float(df.iloc[-1]["Close"]),
-        "ema20": float(df.iloc[-1]["EMA20"]),
-        "rsi": float(df.iloc[-1]["RSI"]),
-        "signal": sig,
+    if sig_idx is None:
+        return None
+    row = df.iloc[sig_idx]
+    return {
+        "date":  str(pd.to_datetime(row["Date"]).date()),
+        "signal": row["Signal"],
+        "close":  float(row["Close"]),
+        "ema20":  float(row["EMA20"]),
+        "rsi":    float(row["RSI"]),
     }
-    return out
 
-# ------------- Optional Zerodha check (NO trading here) ---------------------
-def zerodha_ping() -> str:
-    """
-    Try a lightweight call that needs a valid ACCESS TOKEN.
-    If missing, return an instruction string.
-    """
-    if not (Z_API_KEY and Z_API_SECRET):
-        return "⚠️ Zerodha API key/secret not set."
-    if not Z_ACCESS_TOKEN:
-        return (
-            "ℹ️ Zerodha connected (keys set) but no ACCESS TOKEN yet.\n"
-            "Open Kite → generate request_token → create session → set "
-            "`ZERODHA_ACCESS_TOKEN` secret. We’ll keep trading disabled until then."
-        )
-    # test profile endpoint
+def main():
     try:
-        headers = {
-            "X-Kite-Version": "3",
-            "Authorization": f"token {Z_API_KEY}:{Z_ACCESS_TOKEN}",
-        }
-        r = requests.get("https://api.kite.trade/user/profile", headers=headers, timeout=10)
-        if r.status_code == 200:
-            return "✅ Zerodha access token is valid (profile reachable)."
-        return f"⚠️ Zerodha check failed: {r.status_code} {r.text[:120]}"
-    except Exception as e:
-        return f"⚠️ Zerodha check error: {e}"
+        # Optional Zerodha connect (no trading; just check token if supplied)
+        kite = get_kite()
 
-# ------------- Main ---------------------------------------------------------
-def run_once():
-    try:
-        df = fetch_nifty("6mo", "1d")
-        res = analyze(df)
+        # Data + signal
+        df = fetch_nifty_daily()
+        out = compute_signal(df)
+
+        if not out:
+            tgsend("📝 No new NIFTY signal this run.")
+            return
+
         msg = (
-            f"📈 NIFTY update {res['date']}\n"
-            f"Close: {res['close']:.2f}\n"
-            f"EMA20: {res['ema20']:.2f}\n"
-            f"RSI(14): {res['rsi']:.2f}\n"
-            f"Signal: {res['signal']}"
+            f"🚨 NIFTY Signal: {out['signal']}\n"
+            f"Date: {out['date']}\n"
+            f"Close: {out['close']:.2f}\n"
+            f"EMA20: {out['ema20']:.2f}\n"
+            f"RSI(14): {out['rsi']:.2f}"
         )
         tgsend(msg)
 
-        # Zerodha connection (informational only)
-        zmsg = zerodha_ping()
-        print(zmsg)
-        if "✅" in zmsg or "⚠️" in zmsg:
-            tgsend(zmsg)
+        # If you later want *paper* logs tied to Zerodha quotes, you can add:
+        if kite:
+            # harmless LTP fetch (no order)
+            try:
+                ltp = kite.ltp(["NSE:NIFTY 50"]).get("NSE:NIFTY 50", {}).get("last_price")
+                if ltp:
+                    tgsend(f"ℹ️ Zerodha LTP check: NIFTY ~ {ltp}")
+            except Exception as e:
+                print("Zerodha LTP fetch failed:", e)
 
     except Exception as e:
-        tgsend(f"❌ Bot error: {e}")
+        err = f"❌ Bot error: {e}\n{traceback.format_exc()[-800:]}"
+        tgsend(err)
+        # re-raise so Actions marks the job as failed (useful for debugging)
         raise
 
 if __name__ == "__main__":
-    run_once()
+    main()
