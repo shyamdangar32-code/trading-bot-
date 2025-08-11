@@ -1,95 +1,110 @@
-import os, requests
+import os
+import requests
 import pandas as pd
 import yfinance as yf
 from ta.momentum import RSIIndicator
 
-# --- Telegram secrets from GitHub Actions (or your local env)
-TELEGRAM_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+
+# --- Config from GitHub Secrets (trim spaces/newlines to avoid 404s) ---
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+
 
 def send(msg: str) -> None:
-    """Send a Telegram message if credentials exist; otherwise just print."""
+    """Send a Telegram message; prints errors but doesn't crash the job."""
     print("SEND ->", msg)
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("⚠️ No Telegram credentials set; printing only.")
+        print("⚠️ No Telegram credentials set (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID).")
         return
+
     try:
-        r = requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": msg},
-            timeout=20,
-        )
-        # Show 401/404 etc. in logs but don't crash the run
-        if r.status_code != 200:
-            print("Telegram response:", r.status_code, r.text[:200])
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        r = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg}, timeout=20)
         r.raise_for_status()
     except Exception as e:
         print("Telegram send failed:", repr(e))
 
+
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Flatten MultiIndex columns, find or create 'Close', clean & return df."""
-    if df is None or df.empty:
-        raise RuntimeError("No data frame to normalize.")
-
-    # Flatten MultiIndex -> single string names
+    """
+    Flatten any MultiIndex columns and map any variant like 'Close|^NSEI'
+    to a single canonical 'Close' column (numeric, no NaNs).
+    """
+    # Flatten columns
     if isinstance(df.columns, pd.MultiIndex):
-        df.columns = ["|".join([str(c) for c in tup if c is not None]) for tup in df.columns]
+        df.columns = ["|".join(map(str, c)).strip() for c in df.columns]
     else:
-        df.columns = [str(c) for c in df.columns]
+        df.columns = [str(c).strip() for c in df.columns]
 
-    # Prefer a column that endswith '|Close' (yfinance MultiIndex pattern)
-    close_candidates = [c for c in df.columns if c.lower().endswith("|close")]
-    if not close_candidates:
-        # Fallback: exact 'Close'
-        if "Close" in df.columns:
-            close_candidates = ["Close"]
+    # Find a usable Close column
+    close_col = None
 
-    if not close_candidates:
-        # Some ^NSEI downloads can return a single series named '^NSEI'
-        if "^NSEI" in df.columns:
-            df = df.rename(columns={"^NSEI": "Close"})
-        else:
-            raise RuntimeError(f"'Close' column missing. Columns found: {list(df.columns)}")
-    else:
-        # Map first candidate to 'Close'
-        df = df.rename(columns={close_candidates[0]: "Close"})
+    # 1) exact 'Close'
+    for c in df.columns:
+        if c.lower() == "close":
+            close_col = c
+            break
 
-    # Ensure 'Date' exists as a column (not index)
-    df = df.reset_index()
+    # 2) prefix 'Close|...'
+    if close_col is None:
+        for c in df.columns:
+            if c.lower().startswith("close|"):
+                close_col = c
+                break
 
-    # Clean numeric
-    df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
+    # 3) safety: split on '|' and check first part equals 'close'
+    if close_col is None:
+        for c in df.columns:
+            parts = c.split("|")
+            if parts and parts[0].lower() == "close":
+                close_col = c
+                break
+
+    if close_col is None:
+        raise RuntimeError(f"'Close' column missing. Columns found: {list(df.columns)}")
+
+    df = df.copy()
+    df["Close"] = pd.to_numeric(df[close_col], errors="coerce")
+    df = df.reset_index()          # Ensure a Date column exists from index
     df = df.dropna(subset=["Close"])
-
     return df
 
+
 def fetch_nifty_daily() -> pd.DataFrame:
-    """Fetch ~6 months of daily data for NIFTY (^NSEI) and normalize."""
-    df = yf.download("^NSEI", period="6mo", interval="1d", auto_adjust=True, progress=False)
+    """Download NIFTY (^NSEI) daily candles (last ~6 months)."""
+    df = yf.download(
+        "^NSEI",
+        period="6mo",
+        interval="1d",
+        auto_adjust=False,
+        progress=False,
+    )
     if df is None or df.empty:
-        raise RuntimeError("No data from Yahoo Finance for ^NSEI.")
+        raise RuntimeError("No data from yfinance for ^NSEI")
     return _normalize_columns(df)
 
+
 def analyze(df: pd.DataFrame) -> str:
-    """Compute RSI(14) and produce a small summary message."""
-    rsi = RSIIndicator(close=df["Close"], window=14)
-    last = df.iloc[-1]
+    """Compute RSI(14) and produce a human-readable signal message."""
+    rsi = RSIIndicator(close=df["Close"], window=14, fillna=False)
+    last_row = df.iloc[-1]
     last_rsi = float(rsi.rsi().iloc[-1])
 
-    # Toy signal: BUY if RSI<30, SELL if RSI>70, else HOLD
+    signal = "HOLD"
     if last_rsi < 30:
-        sig = "BUY"
+        signal = "BUY"
     elif last_rsi > 70:
-        sig = "SELL"
-    else:
-        sig = "HOLD"
+        signal = "SELL"
 
+    date_str = str(last_row.get("Date", ""))[:10]
+    close_val = float(last_row["Close"])
     return (
-        f"📈 NIFTY {str(last['Date'])[:10]}\n"
-        f"Close: {last['Close']:.2f}\n"
+        f"📈 NIFTY {date_str}\n"
+        f"Close: {close_val:.2f}\n"
         f"RSI(14): {last_rsi:.1f}\n"
-        f"Signal: {sig}"
+        f"Signal: {signal}"
     )
+
 
 def run_once():
     try:
@@ -98,11 +113,11 @@ def run_once():
         print(msg)
         send(msg)
     except Exception as e:
-        err = f"❗️Bot error: {e}"
+        err = f"❗Bot error: {e}"
         print(err)
         send(err)
-        # re-raise so the GitHub step can mark failure if something is wrong
         raise
+
 
 if __name__ == "__main__":
     run_once()
