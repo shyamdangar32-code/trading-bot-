@@ -2,8 +2,8 @@ name: Daily Trading Bot
 
 on:
   schedule:
-    - cron: '0 9 * * 1-5'   # Weekdays at 09:00 UTC (adjust if you want)
-  workflow_dispatch:        # Allow manual runs
+    - cron: '0 9 * * 1-5'  # Weekdays at 09:00 UTC
+  workflow_dispatch:       # Allow manual runs
 
 jobs:
   run-bot:
@@ -25,9 +25,9 @@ jobs:
       - name: Run trading bot
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
-          ZERODHA_API_KEY:   ${{ secrets.ZERODHA_API_KEY }}
-          ZERODHA_API_SECRET:${{ secrets.ZERODHA_API_SECRET }}
-          SEND_ONLY_SIGNALS: 'true'   # Only send BUY/SELL messages (set 'false' to send HOLD too)
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          ZERODHA_API_KEY: ${{ secrets.ZERODHA_API_KEY }}
+          ZERODHA_API_SECRET: ${{ secrets.ZERODHA_API_SECRET }}
+          SEND_ONLY_SIGNALS: 'true'  # Only send signals, no auto-trade
         run: |
           python main.py
