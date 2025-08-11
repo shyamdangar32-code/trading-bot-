@@ -2,8 +2,8 @@ name: Daily Trading Bot
 
 on:
   schedule:
-    - cron: '0 9 * * 1-5'  # Runs every weekday at 9:00 AM UTC
-  workflow_dispatch:       # Allows manual run
+    - cron: '0 9 * * 1-5'   # Weekdays 09:00 IST-ish (adjust as needed, this is UTC)
+  workflow_dispatch:
 
 jobs:
   run-bot:
@@ -11,10 +11,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
@@ -23,11 +23,39 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Send Telegram ping (debug)
+        env:
+          BOT:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ -n "$BOT" ] && [ -n "$CHAT" ]; then
+            curl -s "https://api.telegram.org/bot${BOT}/sendMessage" \
+              -d "chat_id=${CHAT}" \
+              -d "text=✅ GitHub Actions connected (pre-run)" || true
+          else
+            echo "Telegram secrets missing; skipping debug ping."
+          fi
+
       - name: Run trading bot
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          ZERODHA_API_KEY: ${{ secrets.ZERODHA_API_KEY }}
-          ZERODHA_API_SECRET: ${{ secrets.ZERODHA_API_SECRET }}
+          TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
+          ZERODHA_API_KEY:   ${{ secrets.ZERODHA_API_KEY }}
+          ZERODHA_API_SECRET:${{ secrets.ZERODHA_API_SECRET }}
         run: |
           python main.py
+
+      - name: Telegram alert (workflow status)
+        if: ${{ always() }}
+        env:
+          BOT:     ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT:    ${{ secrets.TELEGRAM_CHAT_ID }}
+          STATUS:  ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -n "$BOT" ] && [ -n "$CHAT" ]; then
+            MSG="Daily Trading Bot finished with status: ${STATUS}. Run: ${RUN_URL}"
+            curl -s "https://api.telegram.org/bot${BOT}/sendMessage" \
+              -d "chat_id=${CHAT}" \
+              -d "text=${MSG}" || true
+          fi
