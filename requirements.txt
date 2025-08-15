@@ -3,3 +3,5 @@ numpy
 yfinance
 requests
 ta
+kiteconnect==5.0.1
+pyotp
