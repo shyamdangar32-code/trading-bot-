@@ -4,6 +4,22 @@ import pandas as pd
 import yfinance as yf
 from ta.momentum import RSIIndicator
 
+# === Zerodha / KiteConnect setup ===
+from kiteconnect import KiteConnect, exceptions
+
+API_KEY       = os.environ["ZERODHA_API_KEY"]
+ACCESS_TOKEN  = os.environ["ZERODHA_ACCESS_TOKEN"]
+
+kite = KiteConnect(api_key=API_KEY)
+kite.set_access_token(ACCESS_TOKEN)
+
+# Quick check to ensure token works before running bot logic
+try:
+    kite.profile()
+    print("✅ Kite token OK")
+except exceptions.TokenException as e:
+    print("❌ Token error:", e)
+    raise
 
 # --- Config from GitHub Secrets (trim spaces/newlines to avoid 404s) ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
