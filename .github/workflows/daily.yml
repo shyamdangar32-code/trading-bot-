@@ -25,9 +25,10 @@ jobs:
       - name: Run trading bot
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          ZERODHA_API_KEY: ${{ secrets.ZERODHA_API_KEY }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          ZERODHA_API_KEY:    ${{ secrets.ZERODHA_API_KEY }}
           ZERODHA_API_SECRET: ${{ secrets.ZERODHA_API_SECRET }}
+          ZERODHA_ACCESS_TOKEN: ${{ secrets.ZERODHA_ACCESS_TOKEN }}
           SEND_ONLY_SIGNALS: 'true'  # Only send signals, no auto-trade
         run: |
           python main.py
